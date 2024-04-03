@@ -34,54 +34,72 @@ def spot_sell(spot_api,currency_pair):
         else:
             print(f"{currency_pair} available low than {spot_api.get_currency_pair(currency_pair).min_base_amount}")
     except ApiException as e:
-        logger.error(f"Error in selling {currency_pair}: {e}")
+        logger.error(f"Error in selling {currency_pair}: {e}") 
 
-def check_and_sell(spot_api):
-    non_tradeable_initially = set()
+def check_and_sell(spot_api, account_name):
+    global non_tradeable_initially
+
+    if account_name not in non_tradeable_initially:
+        non_tradeable_initially[account_name] = {'not_tradable': set(), 'tradable': set()}
+
+    print(f"Checking account: {account_name}")
+
     try:
         current_pairs = {pair.id for pair in spot_api.list_currency_pairs()}
-        print("Searching for tradable pairs...")
 
-        if not non_tradeable_initially:  # 初始搜寻
+        # 初始搜寻
+        if not non_tradeable_initially[account_name]['not_tradable']:
             for balance in spot_api.list_spot_accounts():
                 currency = balance.currency.upper()
                 if currency != 'USDT':
                     pair_id = f"{currency}_USDT"
-                    if not is_currency_pair_tradable(spot_api,pair_id):
-                        non_tradeable_initially.add(pair_id)
-                        print(f"{currency} not tradable now, added to the watchlist.")
+                    if pair_id not in non_tradeable_initially[account_name]['tradable']:
+                        if not is_currency_pair_tradable(spot_api, pair_id):
+                            non_tradeable_initially[account_name]['not_tradable'].add(pair_id)
+                            print(f"{currency} not tradable now, added to the watchlist for account {account_name}.")
+                        else:
+                            non_tradeable_initially[account_name]['tradable'].add(pair_id)
         else:  # 后续检查
             tradable_now = set()
-            for pair_id in non_tradeable_initially:
-                if is_currency_pair_tradable(spot_api,pair_id):
+            for pair_id in non_tradeable_initially[account_name]['not_tradable']:
+                if is_currency_pair_tradable(spot_api, pair_id):
                     print(f"{pair_id.split('_')[0]} is now tradable, initiating sale.")
-                    spot_sell(spot_api,pair_id)
+                    spot_sell(spot_api, pair_id)
                     tradable_now.add(pair_id)
                 else:
                     print(f"{pair_id} not tradable now.")
-            
+
             # 更新 non_tradeable_initially 列表
-            non_tradeable_initially.difference_update(tradable_now)
+            non_tradeable_initially[account_name]['not_tradable'].difference_update(tradable_now)
+            non_tradeable_initially[account_name]['tradable'].update(tradable_now)
 
     except ApiException as e:
         print(f"API Exception: {e}")
 
-def main(spot_api, account_name):
-    print(f"Checking account: {account_name}")
-    check_and_sell(spot_api)
+non_tradeable_initially = {}
+
+def account_monitor(account):
+    configuration = Configuration(key=account['API_KEY'], secret=account['API_SECRET'])
+    api_client = ApiClient(configuration)
+    spot_api = SpotApi(api_client)
+    account_name = account['ACCOUNT_NAME']
+
+    while True:
+        check_and_sell(spot_api, account_name)
+        time.sleep(5)
 
 if __name__ == "__main__":
     with open('config.json', 'r') as config_file:
         accounts = json.load(config_file)
 
-    spot_apis = {}
+    threads = []
     for account in accounts:
-        configuration = Configuration(key=account['API_KEY'], secret=account['API_SECRET'])
-        api_client = ApiClient(configuration)
-        spot_apis[account['ACCOUNT_NAME']] = SpotApi(api_client)
+        thread = threading.Thread(target=account_monitor, args=(account,), daemon=True)
+        thread.start()
+        threads.append(thread)
 
-    while True:
-        for account_name, spot_api_instance in spot_apis.items():
-            main(spot_api_instance, account_name)
-
-        time.sleep(5)
+    try:
+        while True:  # 保持主线程运行，直到收到中断信号
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Program interrupted, exiting...")
